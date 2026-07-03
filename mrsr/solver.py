@@ -72,6 +72,7 @@ def solve_ground_state(
     SolverResult
         Final wavefunction and diagnostic histories.
     """
+    tf.debugging.assert_all_finite(potential, "Potential contains NaN or Inf. A singularity may be on the grid.")
     dtype = potential.dtype
     if psi0 is None:
         tf.random.set_seed(seed)
@@ -106,6 +107,8 @@ def solve_ground_state(
             norms.append(nm_float)
             if verbose:
                 print(f"iter={it:7d}  E={e_float:+.12e}  residual={rn_float:.3e}  norm={nm_float:.6f}")
+            if not np.isfinite(e_float) or not np.isfinite(rn_float):
+                raise FloatingPointError("Energy or residual became non-finite; reduce sigma/tau and check the potential.")
             if rn_float < tolerance:
                 converged = True
                 break

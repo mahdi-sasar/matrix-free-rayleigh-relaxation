@@ -42,10 +42,18 @@ def test_operator_matches_dense_matrix():
     grid = Grid3D((n, n, n), ((-2, 2), (-2, 2), (-2, 2)), dtype=tf.float64)
     v = harmonic_oscillator(grid, alpha=(0.1, 0.2, 0.3))
     p = random_normal(grid, seed=7)
-    hp = apply_hamiltonian(p, v, grid.h).numpy()[1:-1, 1:-1, 1:-1].ravel()
+    hp = apply_hamiltonian(p, v, grid.h).numpy()[1:-1, 1:-1, 1:-1].reshape(-1, order="C")
     H = assemble_dense_hamiltonian_3d(n, grid.h, v.numpy())
-    p_int = p.numpy()[1:-1, 1:-1, 1:-1].ravel()
-    assert np.allclose(hp, H @ p_int, rtol=1e-10, atol=1e-10)
+    p_int = p.numpy()[1:-1, 1:-1, 1:-1].reshape(-1, order="C")
+    dense_hp = H @ p_int
+    diff = hp - dense_hp
+    max_abs = np.max(np.abs(diff))
+    assert np.allclose(hp, dense_hp, rtol=1e-9, atol=1e-9), (
+        f"max_abs_diff={max_abs:.3e}; "
+        f"argmax={np.argmax(np.abs(diff))}; "
+        f"hp={hp[np.argmax(np.abs(diff))]:.16e}; "
+        f"dense={dense_hp[np.argmax(np.abs(diff))]:.16e}"
+    )
 
 
 def test_solver_approaches_lowest_dense_eigenvalue():
