@@ -18,7 +18,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=96)
     ap.add_argument("--box", type=float, default=10.0)
-    ap.add_argument("--sigma", type=float, default=0.5)
+    ap.add_argument("--sigma", type=float, default=0.9)
     ap.add_argument("--tol", type=float, default=1e-8)
     ap.add_argument("--max-iter", type=int, default=100_000)
     ap.add_argument("--init", choices=["random", "gaussian"], default="gaussian")
@@ -30,8 +30,6 @@ def main() -> None:
     L = args.box
     grid = Grid3D((args.n, args.n, args.n), ((0.0, L), (0.0, L), (0.0, L)), dtype=dtype)
     center = grid.off_grid_center()
-    rmin = grid.min_distance_to_point(center)
-    print(f"Coulomb center = {center}; nearest grid-node distance = {rmin:.6e} Bohr")
     v = hydrogen_coulomb(grid, center=center)
     psi0 = random_positive(grid) if args.init == "random" else gaussian(grid, center=center, width=1.0)
 

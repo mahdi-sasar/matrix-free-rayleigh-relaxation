@@ -70,15 +70,3 @@ For Colab GPU runs, open `notebooks/colab_quickstart.ipynb`. Install the reposit
 ## License
 
 Add a license before making the repository public. MIT or BSD-3-Clause would be good choices for broad reuse.
-
-
-## Important Colab debugging note
-
-After updating the repository or uploading a new ZIP in the same Colab runtime, restart the runtime or run:
-
-```python
-import mrsr, inspect
-print(mrsr.__file__)
-```
-
-to make sure Python is importing the package from the newly uploaded folder. Stale editable installs can otherwise cause the tests to use old code. For Coulomb examples, the code now prints the minimum distance from the Coulomb center to the nearest grid node; this must be comfortably nonzero.

@@ -66,32 +66,13 @@ class Grid3D:
         z = tf.linspace(tf.cast(zmin, self.dtype), tf.cast(zmax, self.dtype), nz)
         return tf.meshgrid(x, y, z, indexing="ij")
 
-    def off_grid_center(self, offset_fraction: float = 0.3713906763541037) -> Tuple[float, float, float]:
-        """Return a domain-center position that does not lie on a grid node.
+    def off_grid_center(self, offset_fraction: float = 0.5) -> Tuple[float, float, float]:
+        """Return a domain-center position shifted by a fraction of one grid spacing.
 
-        The default shift is deliberately *not* ``0.5*h``.  On grids with an even
-        number of points the geometric center already lies halfway between two
-        nodes, so adding ``0.5*h`` would move the point exactly onto a grid node.
-        The irrational-looking default avoids this parity trap for both even and
-        odd grid sizes while keeping the Coulomb center within O(h) of the box
-        center.
+        This is useful for Coulomb centers. With an odd number of grid points, the
+        exact center would fall on a grid node; shifting by `h/2` avoids sampling the
+        singularity while preserving the intended centered geometry up to O(h).
         """
         cx, cy, cz = self.center
         shift = offset_fraction * self.h
         return (cx + shift, cy + shift, cz + shift)
-
-    def min_distance_to_point(self, point: Tuple[float, float, float]) -> float:
-        """Return the minimum Euclidean distance from a point to any grid node.
-
-        This is a Python-side diagnostic used to verify that Coulomb centers do
-        not land on the mesh.  It does not modify or smooth the potential.
-        """
-        import numpy as np
-
-        mins = []
-        for (lo, hi), n, c in zip(self.bounds, self.shape, point):
-            h = (hi - lo) / (n - 1)
-            nearest = round((c - lo) / h)
-            nearest = min(max(nearest, 0), n - 1)
-            mins.append(c - (lo + nearest * h))
-        return float(np.sqrt(sum(d * d for d in mins)))
