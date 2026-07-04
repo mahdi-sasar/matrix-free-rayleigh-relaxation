@@ -16,6 +16,20 @@ def _distance(x: Tensor, y: Tensor, z: Tensor, center: Tuple[float, float, float
     return tf.sqrt((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2)
 
 
+def _assert_off_grid(r: Tensor, name: str, tol: float = 1e-12) -> None:
+    """Raise a clear error if a singular center is sampled on the grid.
+
+    This is not a smoothing or pseudopotential.  It is only a guard against the
+    accidental parity bug where a Coulomb center is placed exactly on a mesh node.
+    """
+    rmin = float(tf.reduce_min(r).numpy())
+    if not tf.math.reduce_all(tf.math.is_finite(r)).numpy() or rmin < tol:
+        raise ValueError(
+            f"{name} singularity is on or too close to the grid: min distance = {rmin:.3e}. "
+            "Move the center off the mesh, e.g. use grid.off_grid_center()."
+        )
+
+
 def harmonic_oscillator(grid: Grid3D, alpha=(0.25, 0.25, 0.25), center=None) -> Tensor:
     """V = αx (x-cx)^2 + αy (y-cy)^2 + αz (z-cz)^2.
 
@@ -39,6 +53,7 @@ def hydrogen_coulomb(grid: Grid3D, center=None, charge: float = 1.0) -> Tensor:
         center = grid.off_grid_center()
     x, y, z = grid.coordinates()
     r = _distance(x, y, z, center, grid.dtype)
+    _assert_off_grid(r, "hydrogen_coulomb")
     return -2.0 * tf.cast(charge, grid.dtype) / r
 
 
@@ -75,6 +90,8 @@ def h2plus(grid: Grid3D, separation: float, axis: str = "z", center=None, charge
     x, y, z = grid.coordinates()
     r1 = _distance(x, y, z, c1, grid.dtype)
     r2 = _distance(x, y, z, c2, grid.dtype)
+    _assert_off_grid(r1, "h2plus center 1")
+    _assert_off_grid(r2, "h2plus center 2")
     zcharge = tf.cast(charge, grid.dtype)
     return -2.0 * zcharge / r1 - 2.0 * zcharge / r2
 
@@ -104,6 +121,7 @@ def yukawa(grid: Grid3D, kappa: float = 0.2, center=None, charge: float = 1.0) -
         center = grid.off_grid_center()
     x, y, z = grid.coordinates()
     r = _distance(x, y, z, center, grid.dtype)
+    _assert_off_grid(r, "yukawa")
     return -2.0 * tf.cast(charge, grid.dtype) * tf.exp(-tf.cast(kappa, grid.dtype) * r) / r
 
 
@@ -131,6 +149,8 @@ def point_dipole_pair(grid: Grid3D, q: float = 1.0, separation: float = 0.8, axi
     x, y, z = grid.coordinates()
     rp = _distance(x, y, z, plus, grid.dtype)
     rm = _distance(x, y, z, minus, grid.dtype)
+    _assert_off_grid(rp, "dipole positive charge")
+    _assert_off_grid(rm, "dipole negative charge")
     qq = tf.cast(q, grid.dtype)
     return -2.0 * qq / rp + 2.0 * qq / rm
 

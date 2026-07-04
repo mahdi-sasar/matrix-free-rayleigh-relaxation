@@ -56,6 +56,28 @@ python examples/run_harmonic_oscillator_3d.py --n 48 --tol 1e-8 --out results/ha
 python examples/run_hydrogen_box.py --n 64 --box 10.0 --tol 1e-8 --out results/hydrogen_64
 ```
 
+
+## Main examples
+
+```bash
+# Analytical validation: 3D harmonic oscillator
+python examples/run_harmonic_oscillator_3d.py --n 48 --tol 1e-8 --out results/harmonic_48
+
+# Hydrogen atom in a finite box with an off-grid Coulomb center
+python examples/run_hydrogen_box.py --n 64 --box 10.0 --tol 1e-8 --out results/hydrogen_64
+
+# Hydrogen molecular ion potential-energy curve
+python examples/run_h2plus_curve.py \
+  --n 48 \
+  --box 16.0 \
+  --r-values 0.8 1.0 1.2 1.4 1.6 2.0 2.5 3.0 3.5 4.0 \
+  --sigma 0.5 \
+  --tol 1e-7 \
+  --out results/h2plus_curve_48
+```
+
+For H2+, the electronic energy is computed from `-∇² - 2/r_A - 2/r_B`; the reported total Born--Oppenheimer energy adds the nuclear repulsion term `2/R` in Rydbergs.  The script writes `h2plus_curve.csv` and `h2plus_curve.png`.
+
 ## Google Colab
 
 For Colab GPU runs, open `notebooks/colab_quickstart.ipynb`. Install the repository with `pip install -e . --no-deps` so Colab's preinstalled TensorFlow/CUDA stack is preserved. See `COLAB.md` for the recommended workflow and run order.
@@ -70,3 +92,34 @@ For Colab GPU runs, open `notebooks/colab_quickstart.ipynb`. Install the reposit
 ## License
 
 Add a license before making the repository public. MIT or BSD-3-Clause would be good choices for broad reuse.
+
+
+## Important Colab debugging note
+
+After updating the repository or uploading a new ZIP in the same Colab runtime, restart the runtime or run:
+
+```python
+import mrsr, inspect
+print(mrsr.__file__)
+```
+
+to make sure Python is importing the package from the newly uploaded folder. Stale editable installs can otherwise cause the tests to use old code. For Coulomb examples, the code now prints the minimum distance from the Coulomb center to the nearest grid node; this must be comfortably nonzero.
+
+
+## H2+ grid-phase note
+
+For the H2+ curve, the Coulomb centers are placed halfway between grid nodes in
+the two directions transverse to the bond axis. This avoids sampling the nuclear
+singularity too close to a Cartesian node, which can otherwise produce large,
+unphysical negative spikes in the curve at isolated internuclear separations.
+The potential remains the unsmoothed Coulomb potential at all mesh points.
+Always inspect `rmin_nucleus_A_Bohr` and `rmin_nucleus_B_Bohr` in
+`h2plus_curve.csv`. If a total energy is below roughly -10 Ry for ordinary H2+
+test runs, treat the run as a grid-alignment artifact and rerun with this version
+or with a finer grid/larger box.
+
+To replot an existing curve:
+
+```bash
+python scripts/plot_h2plus_curve.py results/colab_h2plus_curve_48/h2plus_curve.csv
+```

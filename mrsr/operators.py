@@ -37,17 +37,21 @@ def normalize(p: Tensor, h: float, eps: float = 1e-300) -> Tensor:
 
 
 def apply_hamiltonian(p: Tensor, v: Tensor, h: float) -> Tensor:
-    """Apply H = -Δ_h + V to a 3D wavefunction with zero boundaries.
+    """Apply H = -Δ_h + V to a 3D wavefunction with Dirichlet boundaries.
 
     Parameters
     ----------
     p:
-        Full 3D wavefunction including boundary points.
+        Full 3D wavefunction including boundary points. Boundary values are
+        treated as zero Dirichlet data. The function explicitly zeros them so
+        dense-matrix tests and solver calls agree even when a caller supplies
+        a tensor with nonzero boundary entries.
     v:
         Full 3D potential sampled on the same grid.
     h:
         Uniform grid spacing.
     """
+    p = zero_boundary(p)
     c = p[1:-1, 1:-1, 1:-1]
     neigh = (
         p[2:, 1:-1, 1:-1]
