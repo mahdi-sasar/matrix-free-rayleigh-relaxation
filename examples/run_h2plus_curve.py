@@ -8,9 +8,16 @@ The matrix-free solver computes the electronic energy of
 in Rydberg atomic units.  The optional total Born-Oppenheimer energy adds
 proton-proton repulsion, 2/R Ry, for an internuclear separation R in Bohr.
 
-The Coulomb centers are placed slightly off the Cartesian grid in directions
-transverse to the molecular axis.  This avoids evaluating the singularities
+The Coulomb centers are placed off the Cartesian grid in directions transverse
+to the molecular axis.  This avoids direct evaluation of the singularities
 without introducing a pseudopotential or smoothing function.
+
+For publication figures, each separation also saves two wavefunction slices:
+
+  * psi_transverse_*.csv : plane perpendicular to the bond through the midpoint.
+  * psi_bond_*.csv       : plane containing the two nuclei and the bond axis.
+
+The historical psi_mid_z.csv filename is still written for compatibility.
 """
 
 from __future__ import annotations
@@ -19,35 +26,26 @@ import argparse
 from pathlib import Path
 from typing import Tuple
 
+import numpy as np
 import pandas as pd
 import tensorflow as tf
 
 from mrsr.grid import Grid3D
 from mrsr.initializers import gaussian
-from mrsr.io import ensure_dir, save_metadata, save_midplane_slice
+from mrsr.io import ensure_dir, save_metadata
 from mrsr.potentials import h2plus
 from mrsr.solver import save_histories, solve_ground_state
 
 
 def _cell_midpoint_near(grid: Grid3D, coordinate_axis: int, value: float) -> float:
-    """Return the midpoint between two adjacent grid nodes nearest to ``value``.
-
-    Placing Coulomb centers at cell midpoints in the transverse directions avoids
-    the severe grid-phase artifact that occurs when a singularity is sampled too
-    close to a Cartesian node.  This is not a smoothing or pseudopotential; the
-    potential remains exactly Coulombic at the sampled mesh points.
-    """
+    """Return the midpoint between two adjacent grid nodes nearest to ``value``."""
     lo, hi = grid.bounds[coordinate_axis]
     n = grid.shape[coordinate_axis]
     h = (hi - lo) / (n - 1)
-    # Choose a valid cell index 0 <= j <= n-2 whose midpoint is near ``value``.
     j = int((value - lo) // h)
     j = min(max(j, 0), n - 2)
-    candidate = lo + (j + 0.5) * h
-    # The nearest midpoint may be in the neighboring cell when value is close to
-    # an edge.  Check j-1, j, and j+1 to avoid a one-cell bias.
-    best = candidate
-    best_dist = abs(candidate - value)
+    best = lo + (j + 0.5) * h
+    best_dist = abs(best - value)
     for jj in (j - 1, j, j + 1):
         if 0 <= jj <= n - 2:
             mid = lo + (jj + 0.5) * h
@@ -56,6 +54,14 @@ def _cell_midpoint_near(grid: Grid3D, coordinate_axis: int, value: float) -> flo
                 best = mid
                 best_dist = dist
     return float(best)
+
+
+def _nearest_grid_index(grid: Grid3D, coordinate_axis: int, value: float) -> int:
+    lo, hi = grid.bounds[coordinate_axis]
+    n = grid.shape[coordinate_axis]
+    h = (hi - lo) / (n - 1)
+    idx = int(round((value - lo) / h))
+    return min(max(idx, 0), n - 1)
 
 
 def transverse_offgrid_center(
@@ -69,9 +75,6 @@ def transverse_offgrid_center(
     it is placed halfway between neighboring grid nodes.  Therefore, even if one
     nucleus happens to align with a grid plane along the bond coordinate, its
     nearest possible grid-node distance is at least sqrt(2) h / 2.
-
-    This removes the large, unphysical spikes caused by subgrid Coulomb alignment
-    while preserving an unsmoothed Coulomb potential.
     """
     c = list(grid.center)
     axes = {"x": 0, "y": 1, "z": 2}
@@ -96,23 +99,104 @@ def nuclei_positions(center, separation: float, axis: str = "z"):
     raise ValueError("axis must be 'x', 'y', or 'z'.")
 
 
+def _save_csv(path: Path, array: np.ndarray) -> None:
+    np.savetxt(path, array, delimiter=",")
+
+
+def save_h2plus_slices(
+    psi: tf.Tensor,
+    grid: Grid3D,
+    outdir: Path,
+    center: Tuple[float, float, float],
+    separation: float,
+    axis: str = "z",
+) -> dict:
+    """Save transverse and bond-plane slices for H2+.
+
+    Returns metadata describing the saved files and their axis labels.
+    """
+    arr = psi.numpy()
+    cx, cy, cz = center
+    ix = _nearest_grid_index(grid, 0, cx)
+    iy = _nearest_grid_index(grid, 1, cy)
+    iz = _nearest_grid_index(grid, 2, cz)
+
+    meta: dict[str, dict] = {}
+
+    if axis == "z":
+        # Transverse plane perpendicular to the bond: x-y at z ~ center.
+        trans = arr[:, :, iz]
+        trans_name = "psi_transverse_xy.csv"
+        trans_labels = ("X", "Y")
+        # Bond plane containing the nuclei: x-z at y ~ center.
+        bond = arr[:, iy, :]
+        bond_name = "psi_bond_xz.csv"
+        bond_labels = ("X", "Z")
+        nuclei_2d = [(cx, cz - 0.5 * separation), (cx, cz + 0.5 * separation)]
+    elif axis == "x":
+        # Transverse plane perpendicular to the bond: y-z at x ~ center.
+        trans = arr[ix, :, :]
+        trans_name = "psi_transverse_yz.csv"
+        trans_labels = ("Y", "Z")
+        # Bond plane containing the nuclei: x-y at z ~ center.
+        bond = arr[:, :, iz]  # dimensions x,y
+        bond_name = "psi_bond_xy.csv"
+        bond_labels = ("X", "Y")
+        nuclei_2d = [(cx - 0.5 * separation, cy), (cx + 0.5 * separation, cy)]
+    elif axis == "y":
+        # Transverse plane perpendicular to the bond: x-z at y ~ center.
+        trans = arr[:, iy, :]
+        trans_name = "psi_transverse_xz.csv"
+        trans_labels = ("X", "Z")
+        # Bond plane containing the nuclei: x-y at z ~ center.
+        bond = arr[:, :, iz]  # dimensions x,y
+        bond_name = "psi_bond_xy.csv"
+        bond_labels = ("X", "Y")
+        nuclei_2d = [(cx, cy - 0.5 * separation), (cx, cy + 0.5 * separation)]
+    else:
+        raise ValueError("axis must be 'x', 'y', or 'z'.")
+
+    _save_csv(outdir / trans_name, trans)
+    _save_csv(outdir / bond_name, bond)
+
+    # Historical filename used by earlier notebooks/scripts.
+    _save_csv(outdir / "psi_mid_z.csv", trans)
+
+    meta["transverse"] = {
+        "file": trans_name,
+        "axis_labels": trans_labels,
+        "description": "Plane perpendicular to the molecular bond through the midpoint.",
+    }
+    meta["bond"] = {
+        "file": bond_name,
+        "axis_labels": bond_labels,
+        "description": "Plane containing the two nuclei and the molecular bond.",
+        "nuclei_positions_2d": nuclei_2d,
+    }
+    meta["legacy_mid_slice"] = {"file": "psi_mid_z.csv", "same_as": trans_name}
+    return meta
+
+
 def make_plot(csv_path: Path, out_png: Path) -> None:
     """Plot electronic and total H2+ energies versus separation."""
     import matplotlib.pyplot as plt
 
-    df = pd.read_csv(csv_path)
-    fig = plt.figure(figsize=(6.0, 4.2))
-    plt.plot(df["R_Bohr"], df["electronic_energy_Ry"], marker="o", label="electronic")
-    plt.plot(df["R_Bohr"], df["total_energy_Ry"], marker="o", label="total = electronic + 2/R")
+    df = pd.read_csv(csv_path).sort_values("R_Bohr")
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+    ax.plot(df["R_Bohr"], df["electronic_energy_Ry"], marker="o", markersize=5, linewidth=2.0, label="Electronic energy")
+    ax.plot(df["R_Bohr"], df["total_energy_Ry"], marker="s", markersize=5, linewidth=2.0, label="Total energy")
     if len(df):
         idx = int(df["total_energy_Ry"].idxmin())
-        plt.scatter([df.loc[idx, "R_Bohr"]], [df.loc[idx, "total_energy_Ry"]], s=80, label="lowest sampled total")
-    plt.xlabel("Internuclear separation R (Bohr)")
-    plt.ylabel("Energy (Ry)")
-    plt.title("H2+ finite-box potential-energy curve")
-    plt.legend()
-    plt.tight_layout()
-    fig.savefig(out_png, dpi=200)
+        rbest = float(df.loc[idx, "R_Bohr"])
+        ebest = float(df.loc[idx, "total_energy_Ry"])
+        ax.scatter([rbest], [ebest], s=90, zorder=5, label=fr"Lowest sampled total ($R={rbest:.3f}$ Bohr)")
+        ax.axvline(rbest, linestyle="--", linewidth=1.0, alpha=0.5)
+    ax.set_xlabel("Internuclear separation $R$ (Bohr)")
+    ax.set_ylabel("Energy (Ry)")
+    ax.set_title(r"$\mathrm{H}_2^+$ finite-box potential-energy curve")
+    ax.grid(True, alpha=0.25, linewidth=0.8)
+    ax.legend(frameon=True)
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -145,9 +229,8 @@ def main() -> None:
     )
 
     rows = []
-    # A broad Gaussian is a useful first guess for the covalent one-electron state.
-    # Subsequent separations use continuation from the previous solution.
     psi0 = gaussian(grid, center=center, width=max(1.5, 0.20 * args.box))
+    slice_catalog = {}
 
     for R in args.r_values:
         c1, c2 = nuclei_positions(center, R, args.axis)
@@ -167,11 +250,11 @@ def main() -> None:
             max_iterations=args.max_iter,
             check_every=args.check_every,
         )
-        # Continuation: use this solution as initial guess for the next separation.
         psi0 = result.psi
         case_dir = ensure_dir(out / f"R_{R:.4f}")
         save_histories(result, case_dir / "history.csv")
-        save_midplane_slice(result.psi, case_dir / "psi_mid_z.csv", axis=args.axis)
+        slice_catalog[f"R_{R:.4f}"] = save_h2plus_slices(result.psi, grid, case_dir, center, R, args.axis)
+
         total_energy = result.energy + 2.0 / R
         rows.append({
             "R_Bohr": R,
@@ -209,6 +292,7 @@ def main() -> None:
         sigma=args.sigma,
         tolerance=args.tol,
         dtype=str(dtype.name),
+        slice_catalog=slice_catalog,
         note="Total energy adds proton-proton repulsion 2/R in Rydberg units. Coulomb centers are cell-centered transversely to reduce grid-phase artifacts.",
     )
     print(f"Wrote {csv_path}")

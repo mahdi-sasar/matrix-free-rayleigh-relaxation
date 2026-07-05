@@ -121,3 +121,17 @@ To replot an existing curve:
 ```bash
 python scripts/plot_h2plus_curve.py results/colab_h2plus_curve_48/h2plus_curve.csv
 ```
+
+### Publication-ready H2+ plotting
+
+The H2+ workflow now saves both transverse and bond-plane wavefunction slices for every sampled internuclear distance. Use:
+
+```bash
+python scripts/plot_h2plus_curve.py results/colab_h2plus_curve_48/h2plus_curve.csv \
+    --out results/colab_h2plus_curve_48/h2plus_curve_pretty.png
+
+python scripts/plot_h2plus_slices.py results/colab_h2plus_curve_48 --R best --plane bond --pdf
+python scripts/plot_h2plus_slices.py results/colab_h2plus_curve_48 --R best --plane transverse --pdf
+```
+
+The bond-plane plot contains the two nuclei and is the preferred paper figure. The transverse plane is useful as a symmetry and grid-quality diagnostic. Density plots use a red-yellow `YlOrRd` heatmap with contour overlays by default.
