@@ -178,25 +178,26 @@ def save_h2plus_slices(
 
 
 def make_plot(csv_path: Path, out_png: Path) -> None:
-    """Plot electronic and total H2+ energies versus separation."""
+    """Plot electronic and total H2+ energies versus separation and save PNG/PDF."""
     import matplotlib.pyplot as plt
 
     df = pd.read_csv(csv_path).sort_values("R_Bohr")
     fig, ax = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-    ax.plot(df["R_Bohr"], df["electronic_energy_Ry"], marker="o", markersize=5, linewidth=2.0, label="Electronic energy")
-    ax.plot(df["R_Bohr"], df["total_energy_Ry"], marker="s", markersize=5, linewidth=2.0, label="Total energy")
+    ax.plot(df["R_Bohr"], df["electronic_energy_Ry"], marker="o", markersize=5, linewidth=2.0, color="black", markerfacecolor="black", markeredgecolor="black", label="Electronic energy")
+    ax.plot(df["R_Bohr"], df["total_energy_Ry"], marker="s", markersize=5, linewidth=2.0, color="red", markerfacecolor="red", markeredgecolor="red", label="Total energy")
     if len(df):
         idx = int(df["total_energy_Ry"].idxmin())
         rbest = float(df.loc[idx, "R_Bohr"])
         ebest = float(df.loc[idx, "total_energy_Ry"])
-        ax.scatter([rbest], [ebest], s=90, zorder=5, label=fr"Lowest sampled total ($R={rbest:.3f}$ Bohr)")
-        ax.axvline(rbest, linestyle="--", linewidth=1.0, alpha=0.5)
+        ax.scatter([rbest], [ebest], s=90, zorder=5, color="red", edgecolors="red", label=fr"Lowest sampled total ($R={rbest:.3f}$ Bohr)")
+        ax.axvline(rbest, linestyle="--", linewidth=1.0, color="red", alpha=0.5)
     ax.set_xlabel("Internuclear separation $R$ (Bohr)")
     ax.set_ylabel("Energy (Ry)")
     ax.set_title(r"$\mathrm{H}_2^+$ finite-box potential-energy curve")
     ax.grid(True, alpha=0.25, linewidth=0.8)
     ax.legend(frameon=True)
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    fig.savefig(out_png.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 

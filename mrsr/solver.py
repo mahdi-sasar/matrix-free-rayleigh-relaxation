@@ -33,6 +33,8 @@ class SolverResult:
     energy_history: np.ndarray
     residual_history: np.ndarray
     norm_history: np.ndarray
+    iteration_history: np.ndarray
+    check_every: int
 
 
 def solve_ground_state(
@@ -82,20 +84,36 @@ def solve_ground_state(
 
     psi = normalize(zero_boundary(psi), h)
 
+    if check_every <= 0:
+        raise ValueError("check_every must be a positive integer.")
+    if max_iterations < 0:
+        raise ValueError("max_iterations must be nonnegative.")
+
     if tau is None:
+        if not (0.0 < sigma < 1.0):
+            raise ValueError(
+                "For the theorem-backed step bound, sigma must satisfy 0 < sigma < 1. "
+                "Use an explicit tau only for exploratory runs outside the proven bound."
+            )
         dbound = spectral_diameter_bound(potential, h, dimension=3)
         tau_tf = 2.0 * tf.cast(sigma, dtype) / dbound
     else:
+        if tau <= 0.0:
+            raise ValueError("tau must be positive.")
         tau_tf = tf.cast(tau, dtype)
 
     energies: list[float] = []
     residuals: list[float] = []
     norms: list[float] = []
+    iterations_sampled: list[int] = []
     converged = False
     start = perf_counter()
 
+    # At most max_iterations relaxation updates are performed.  Diagnostics are
+    # recorded before the next update, so iteration 0 denotes the normalized
+    # initial state.
     for it in range(max_iterations + 1):
-        if it % check_every == 0:
+        if it % check_every == 0 or it == max_iterations:
             e = rayleigh_quotient(psi, potential, h)
             rn = normalized_residual(psi, potential, h, e)
             nm = l2_norm(psi, h)
@@ -105,6 +123,7 @@ def solve_ground_state(
             energies.append(e_float)
             residuals.append(rn_float)
             norms.append(nm_float)
+            iterations_sampled.append(it)
             if verbose:
                 print(f"iter={it:7d}  E={e_float:+.12e}  residual={rn_float:.3e}  norm={nm_float:.6f}")
             if not np.isfinite(e_float) or not np.isfinite(rn_float):
@@ -112,6 +131,9 @@ def solve_ground_state(
             if rn_float < tolerance:
                 converged = True
                 break
+
+        if it == max_iterations:
+            break
 
         e = rayleigh_quotient(psi, potential, h)
         r = residual(psi, potential, h, e)
@@ -132,6 +154,8 @@ def solve_ground_state(
         energy_history=np.array(energies, dtype=float),
         residual_history=np.array(residuals, dtype=float),
         norm_history=np.array(norms, dtype=float),
+        iteration_history=np.array(iterations_sampled, dtype=int),
+        check_every=check_every,
     )
 
 
@@ -143,6 +167,7 @@ def save_histories(result: SolverResult, path: str) -> None:
     df = pd.DataFrame(
         {
             "sample": np.arange(n),
+            "iteration": result.iteration_history,
             "energy_Ry": result.energy_history,
             "normalized_residual": result.residual_history,
             "norm": result.norm_history,

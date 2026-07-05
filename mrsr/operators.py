@@ -68,14 +68,23 @@ def apply_hamiltonian(p: Tensor, v: Tensor, h: float) -> Tensor:
 
 
 def rayleigh_quotient(p: Tensor, v: Tensor, h: float) -> Tensor:
-    hp = apply_hamiltonian(p, v, h)
-    return l2_inner(p, hp, h) / l2_inner(p, p, h)
+    """Rayleigh quotient on the zero-Dirichlet subspace.
+
+    The input is projected onto the Dirichlet subspace before both the numerator
+    and denominator are evaluated.  This keeps the numerical routine exactly
+    consistent with the mathematical state space used in the paper.
+    """
+    p0 = zero_boundary(p)
+    hp = apply_hamiltonian(p0, v, h)
+    return l2_inner(p0, hp, h) / l2_inner(p0, p0, h)
 
 
 def residual(p: Tensor, v: Tensor, h: float, energy: Tensor | None = None) -> Tensor:
+    """Eigen-residual R = (H - epsilon I) p on the Dirichlet subspace."""
+    p0 = zero_boundary(p)
     if energy is None:
-        energy = rayleigh_quotient(p, v, h)
-    return apply_hamiltonian(p, v, h) - energy * p
+        energy = rayleigh_quotient(p0, v, h)
+    return apply_hamiltonian(p0, v, h) - energy * p0
 
 
 def residual_norm(p: Tensor, v: Tensor, h: float, energy: Tensor | None = None) -> Tensor:
@@ -83,11 +92,13 @@ def residual_norm(p: Tensor, v: Tensor, h: float, energy: Tensor | None = None) 
 
 
 def normalized_residual(p: Tensor, v: Tensor, h: float, energy: Tensor | None = None) -> Tensor:
+    """Scale-invariant residual used as the stopping criterion."""
+    p0 = zero_boundary(p)
     if energy is None:
-        energy = rayleigh_quotient(p, v, h)
-    hp = apply_hamiltonian(p, v, h)
-    r = hp - energy * p
-    denom = l2_norm(hp, h) + tf.abs(energy) * l2_norm(p, h) + tf.cast(1e-300, p.dtype)
+        energy = rayleigh_quotient(p0, v, h)
+    hp = apply_hamiltonian(p0, v, h)
+    r = hp - energy * p0
+    denom = l2_norm(hp, h) + tf.abs(energy) * l2_norm(p0, h) + tf.cast(1e-300, p0.dtype)
     return l2_norm(r, h) / denom
 
 
