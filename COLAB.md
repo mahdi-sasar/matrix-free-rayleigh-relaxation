@@ -135,3 +135,18 @@ python scripts/plot_h2plus_slices.py results/colab_h2plus_curve_48 --R best --pl
 ```
 
 The bond-plane plot contains the two nuclei and is the preferred paper figure. The transverse plane is useful as a symmetry and grid-quality diagnostic. Density plots use a red-yellow `YlOrRd` heatmap with contour overlays by default.
+
+
+# Colab workflow note
+
+Use `notebooks/colab_quickstart.ipynb` for the full workflow. It includes:
+
+- small dense-matrix correctness checks,
+- harmonic oscillator validation,
+- hydrogen single-grid and N-sweep runs,
+- publication-ready hydrogen energy convergence plots,
+- largest-N hydrogen mid-slice heatmap,
+- H2+ energy curve,
+- H2+ bond-plane and transverse heatmaps.
+
+For paper-quality runs, mount Google Drive and use the production templates in the notebook.
