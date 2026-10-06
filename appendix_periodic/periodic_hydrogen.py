@@ -149,9 +149,11 @@ def l2_norm(a: tf.Tensor, h: float) -> tf.Tensor:
     return tf.sqrt(tf.maximum(value, tf.cast(0.0, value.dtype)))
 
 
-def normalize(a: tf.Tensor, h: float, eps: float = 1e-300) -> tf.Tensor:
+def normalize(a: tf.Tensor, h: float) -> tf.Tensor:
+    """Normalize without using an epsilon that underflows in float32."""
     nrm = l2_norm(a, h)
-    safe = tf.maximum(nrm, tf.cast(eps, a.dtype.real_dtype))
+    tiny = np.finfo(a.dtype.real_dtype.as_numpy_dtype).tiny
+    safe = tf.maximum(nrm, tf.cast(tiny, a.dtype.real_dtype))
     return a / tf.cast(safe, a.dtype)
 
 
@@ -216,12 +218,102 @@ def normalized_residual(
     if energy is None:
         energy = tf.math.real(l2_inner(psi, hpsi, h) / l2_inner(psi, psi, h))
     r = hpsi - tf.cast(energy, psi.dtype) * psi
+    tiny = np.finfo(energy.dtype.as_numpy_dtype).tiny
     denom = (
         l2_norm(hpsi, h)
         + tf.abs(energy) * l2_norm(psi, h)
-        + tf.cast(1e-300, energy.dtype)
+        + tf.cast(tiny, energy.dtype)
     )
     return l2_norm(r, h) / denom
+
+
+def _bloch_neighbor_sum_tensor(
+    psi: tf.Tensor,
+    kvec: tf.Tensor,
+    a: tf.Tensor,
+) -> tf.Tensor:
+    """Tensor-only Bloch neighbor sum used inside the compiled relaxation loop."""
+    real_dtype = psi.dtype.real_dtype
+    kvec = tf.cast(kvec, real_dtype)
+    a = tf.cast(a, real_dtype)
+    phases = tf.exp(tf.complex(tf.zeros_like(kvec), kvec * a))
+    px, py, pz = phases[0], phases[1], phases[2]
+
+    xp = tf.concat([psi[1:, :, :], px * psi[:1, :, :]], axis=0)
+    xm = tf.concat([tf.math.conj(px) * psi[-1:, :, :], psi[:-1, :, :]], axis=0)
+    yp = tf.concat([psi[:, 1:, :], py * psi[:, :1, :]], axis=1)
+    ym = tf.concat([tf.math.conj(py) * psi[:, -1:, :], psi[:, :-1, :]], axis=1)
+    zp = tf.concat([psi[:, :, 1:], pz * psi[:, :, :1]], axis=2)
+    zm = tf.concat([tf.math.conj(pz) * psi[:, :, -1:], psi[:, :, :-1]], axis=2)
+    return xp + xm + yp + ym + zp + zm
+
+
+def _apply_hamiltonian_tensor(
+    psi: tf.Tensor,
+    potential_complex: tf.Tensor,
+    h: tf.Tensor,
+    a: tf.Tensor,
+    kvec: tf.Tensor,
+) -> tf.Tensor:
+    neigh = _bloch_neighbor_sum_tensor(psi, kvec, a)
+    kinetic = (tf.cast(6.0, psi.dtype) * psi - neigh) / tf.cast(h * h, psi.dtype)
+    return kinetic + potential_complex * psi
+
+
+def _energy_and_residual_tensor(
+    psi: tf.Tensor,
+    potential_complex: tf.Tensor,
+    h: tf.Tensor,
+    a: tf.Tensor,
+    kvec: tf.Tensor,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    hpsi = _apply_hamiltonian_tensor(psi, potential_complex, h, a, kvec)
+    energy = tf.math.real(l2_inner(psi, hpsi, h) / l2_inner(psi, psi, h))
+    residual_vec = hpsi - tf.cast(energy, psi.dtype) * psi
+    tiny = np.finfo(energy.dtype.as_numpy_dtype).tiny
+    denom = (
+        l2_norm(hpsi, h)
+        + tf.abs(energy) * l2_norm(psi, h)
+        + tf.cast(tiny, energy.dtype)
+    )
+    residual_value = l2_norm(residual_vec, h) / denom
+    return energy, residual_value, hpsi
+
+
+@tf.function(reduce_retracing=True)
+def _relax_chunk(
+    psi: tf.Tensor,
+    potential_complex: tf.Tensor,
+    h: tf.Tensor,
+    a: tf.Tensor,
+    kvec: tf.Tensor,
+    tau: tf.Tensor,
+    nsteps: tf.Tensor,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Run several Rayleigh-residual updates in one TensorFlow graph."""
+    i0 = tf.constant(0, dtype=tf.int32)
+
+    def cond(i, state):
+        return i < nsteps
+
+    def body(i, state):
+        hpsi = _apply_hamiltonian_tensor(state, potential_complex, h, a, kvec)
+        energy = tf.math.real(l2_inner(state, hpsi, h) / l2_inner(state, state, h))
+        r = hpsi - tf.cast(energy, state.dtype) * state
+        state = normalize(state - tf.cast(tau, state.dtype) * r, h)
+        return i + 1, state
+
+    _, psi = tf.while_loop(
+        cond,
+        body,
+        loop_vars=(i0, psi),
+        parallel_iterations=1,
+        swap_memory=False,
+    )
+    energy, residual_value, _ = _energy_and_residual_tensor(
+        psi, potential_complex, h, a, kvec
+    )
+    return psi, energy, residual_value
 
 
 def spectral_diameter_bound(potential: tf.Tensor, h: float) -> tf.Tensor:
@@ -252,19 +344,21 @@ def solve_ground_state(
     verbose: bool = True,
     real_dtype: tf.dtypes.DType = tf.float64,
 ) -> BlochResult:
-    """Solve the lowest state at one Bloch vector by normalized Rayleigh relaxation."""
+    """Solve the lowest state using compiled chunks of Rayleigh-residual updates."""
     if not (0.0 < sigma < 1.0) and tau is None:
         raise ValueError("For the theorem-backed bound, sigma must satisfy 0 < sigma < 1.")
     if tolerance <= 0.0:
         raise ValueError("tolerance must be positive.")
     if check_every <= 0:
         raise ValueError("check_every must be positive.")
+    if max_iterations < 0:
+        raise ValueError("max_iterations must be nonnegative.")
 
     v = tf.convert_to_tensor(potential, dtype=real_dtype)
     if v.shape.rank != 3 or len(set(v.shape.as_list())) != 1:
         raise ValueError("potential must be a cubic N x N x N array.")
     n = int(v.shape[0])
-    h = a / n
+    h_value = a / n
     complex_dtype = _complex_dtype_for(real_dtype)
 
     if psi0 is None:
@@ -276,53 +370,67 @@ def solve_ground_state(
         else:
             p0r = tf.cast(p0, real_dtype)
             psi = tf.complex(p0r, tf.zeros_like(p0r))
-    psi = normalize(psi, h)
+    psi = normalize(psi, h_value)
 
     if tau is None:
-        dbound = spectral_diameter_bound(v, h)
+        dbound = spectral_diameter_bound(v, h_value)
         tau_tf = tf.cast(2.0 * sigma, real_dtype) / dbound
     else:
         if tau <= 0.0:
             raise ValueError("tau must be positive.")
         tau_tf = tf.cast(tau, real_dtype)
 
-    iterations = []
-    energies = []
-    residuals = []
+    h_tf = tf.cast(h_value, real_dtype)
+    a_tf = tf.cast(a, real_dtype)
+    k_tf = tf.convert_to_tensor(kvec, dtype=real_dtype)
+    vc = tf.cast(v, complex_dtype)
+
+    iterations: list[int] = []
+    energies: list[float] = []
+    residuals: list[float] = []
     converged = False
-    start = perf_counter()
+    start_time = perf_counter()
 
-    for it in range(max_iterations + 1):
-        if it % check_every == 0 or it == max_iterations:
-            e = rayleigh_quotient(psi, v, h, a, kvec)
-            rr = normalized_residual(psi, v, h, a, kvec, e)
-            e_float = float(e.numpy())
-            rr_float = float(rr.numpy())
-            if not np.isfinite(e_float) or not np.isfinite(rr_float):
-                raise FloatingPointError("Non-finite Bloch energy or residual encountered.")
-            iterations.append(it)
-            energies.append(e_float)
-            residuals.append(rr_float)
-            if verbose:
-                print(
-                    f"iter={it:7d}  E={e_float:+.12e} Ry  "
-                    f"residual={rr_float:.3e}  k={tuple(float(x) for x in kvec)}"
-                )
-            if rr_float < tolerance:
-                converged = True
-                break
+    energy_tf, residual_tf, _ = _energy_and_residual_tensor(psi, vc, h_tf, a_tf, k_tf)
+    it = 0
 
-        if it == max_iterations:
+    while True:
+        e_float = float(energy_tf.numpy())
+        rr_float = float(residual_tf.numpy())
+        if not np.isfinite(e_float) or not np.isfinite(rr_float):
+            raise FloatingPointError("Non-finite Bloch energy or residual encountered.")
+
+        iterations.append(it)
+        energies.append(e_float)
+        residuals.append(rr_float)
+
+        if verbose:
+            print(
+                f"iter={it:7d}  E={e_float:+.12e} Ry  "
+                f"residual={rr_float:.3e}  k={tuple(float(x) for x in kvec)}"
+            )
+
+        if rr_float < tolerance:
+            converged = True
+            break
+        if it >= max_iterations:
             break
 
-        e = rayleigh_quotient(psi, v, h, a, kvec)
-        hpsi = apply_hamiltonian(psi, v, h, a, kvec)
-        r = hpsi - tf.cast(e, complex_dtype) * psi
-        psi = normalize(psi - tf.cast(tau_tf, complex_dtype) * r, h)
+        steps = min(check_every, max_iterations - it)
+        psi, energy_tf, residual_tf = _relax_chunk(
+            psi,
+            vc,
+            h_tf,
+            a_tf,
+            k_tf,
+            tau_tf,
+            tf.constant(steps, dtype=tf.int32),
+        )
+        it += steps
 
-    elapsed = perf_counter() - start
-    final_energy = float(rayleigh_quotient(psi, v, h, a, kvec).numpy())
-    final_residual = float(normalized_residual(psi, v, h, a, kvec).numpy())
+    elapsed = perf_counter() - start_time
+    final_energy = float(energy_tf.numpy())
+    final_residual = float(residual_tf.numpy())
 
     return BlochResult(
         psi=psi,
@@ -338,7 +446,6 @@ def solve_ground_state(
         energy_history=np.asarray(energies, dtype=float),
         residual_history=np.asarray(residuals, dtype=float),
     )
-
 
 def free_electron_fd_energy(kvec: ArrayLike3, h: float) -> float:
     """Exact lowest-plane-wave energy of the second-order stencil at k."""
